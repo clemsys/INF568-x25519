@@ -1,0 +1,23 @@
+[package]
+name = "x25519"
+version = "0.1.0"
+edition = "2021"
+authors = ["Clément CHAPOT <clement.chapot@polytechnique.edu>"]
+description = "x25519 implementation following RFC 7748 for INF568 course at École polytechnique"
+readme = "README.md"
+repository = "https://github.com/clemsys/INF568-x25519"
+license = "MIT OR Apache-2.0"
+categories = ["algorithms", "cryptography", "command-line-utilities"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4.4.16", features = ["cargo"] }
+rug = "1.23"
+
+[dev-dependencies]
+assert_cmd = "2.0.13"
+
+[profile.release]
+strip = true
+lto = true
