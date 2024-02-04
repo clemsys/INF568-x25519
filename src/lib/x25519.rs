@@ -1,167 +1,89 @@
-use rug::Integer;
+use self::super::montgomery::ladder;
+use rug::{integer::Order, ops::Pow, Integer};
 
-#[derive(Clone)]
-struct PCoord {
-    x: Integer,
-    z: Integer,
+// little endian 32-byte array
+pub type Bytes = [u8; 32];
+
+fn curve25519(m: &Integer, x_p: &Integer) -> Integer {
+    let p = Integer::from(2).pow(255) - Integer::from(19);
+    let a = Integer::from(486_662);
+    ladder(&p, &a, m, x_p)
 }
 
-impl std::ops::Mul<bool> for PCoord {
-    type Output = PCoord;
-    /// constant time multiplication of a PCoord by a bool
-    fn mul(self, rhs: bool) -> PCoord {
-        let f = rhs as u32;
-        let zero = PCoord {
-            x: Integer::from(0),
-            z: Integer::from(0),
-        };
-        PCoord {
-            x: self.x.clone() * f + zero.x.clone() * (1 - f),
-            z: self.z.clone() * f + zero.z.clone() * (1 - f),
-        }
-    }
+fn x25519(m: &Bytes, x_p: &Bytes) -> Bytes {
+    let mut m = *m;
+    m[0] &= 248;
+    m[31] &= 127;
+    m[31] |= 64;
+
+    let p = Integer::from(2).pow(255) - Integer::from(19);
+    let m = Integer::from_digits(&m, Order::Lsf);
+    let x_p = Integer::from_digits(x_p, Order::Lsf);
+    let mut bytes: Vec<u8> = curve25519(&m.modulo(&p), &x_p.modulo(&p)).to_digits(Order::Lsf);
+    bytes.resize(32, 0);
+    bytes.try_into().unwrap()
 }
 
-impl std::ops::Add<PCoord> for PCoord {
-    type Output = PCoord;
-    /// coordinate-wise addition of two PCoord
-    fn add(self, rhs: PCoord) -> PCoord {
-        PCoord {
-            x: self.x + rhs.x,
-            z: self.z + rhs.z,
-        }
-    }
+pub fn generate_public_key(private: &Bytes) -> Bytes {
+    let mut x_p: Bytes = [0u8; 32];
+    x_p[0] = 9;
+    x25519(private, &x_p)
 }
 
-impl PCoord {
-    /// coordinate-wise modulo of a PCoord
-    fn modulo(self, p: &Integer) -> PCoord {
-        PCoord {
-            x: self.x.modulo(p),
-            z: self.z.modulo(p),
-        }
-    }
-
-    /// replace x by x/z and z by 1
-    fn normalize(self, p: &Integer) -> PCoord {
-        PCoord {
-            x: (self.x * self.z.invert(p).unwrap()).modulo(p),
-            z: Integer::from(1),
-        }
-    }
-}
-
-fn x_add(p: &Integer, x_p: &PCoord, x_q: &PCoord, x_pmq: &PCoord) -> PCoord {
-    let two = Integer::from(2);
-    let u = ((x_p.x.clone() - &x_p.z).modulo(p) * (x_q.x.clone() + &x_q.z).modulo(p)).modulo(p);
-    let v = ((x_p.x.clone() + &x_p.z).modulo(p) * (x_q.x.clone() - &x_q.z).modulo(p)).modulo(p);
-    let x = x_pmq.z.clone() * ((u.clone() + &v).secure_pow_mod(&two, p));
-    let z = x_pmq.x.clone() * ((u - v).secure_pow_mod(&two, p));
-    PCoord { x, z }
-}
-
-fn x_dbl(p: &Integer, a: &Integer, x_p: &PCoord) -> PCoord {
-    let two = Integer::from(2);
-    let q = (x_p.x.clone() + &x_p.z).secure_pow_mod(&two, p);
-    let r = (x_p.x.clone() - &x_p.z).secure_pow_mod(&two, p);
-    let s = (q.clone() - &r).modulo(p);
-    let x = (q * &r).modulo(p);
-    let ap2o4ts = ((((a.clone() + 2) * (Integer::from(4).invert(p).unwrap()).modulo(p)) * &s)
-        as Integer)
-        .modulo(p);
-    let z: Integer = (((r + ap2o4ts) * s) as Integer).modulo(p);
-    PCoord { x, z }
-}
-
-fn ladder(p: &Integer, a: &Integer, m: &Integer, x_p: &Integer) -> Integer {
-    let u = PCoord {
-        x: x_p.clone(),
-        z: Integer::from(1),
-    };
-    let mut x_0 = PCoord {
-        x: Integer::from(1),
-        z: Integer::from(0),
-    };
-    let mut x_1 = u.clone();
-    for i in (0..m.significant_bits()).rev() {
-        let add = x_add(&p, &x_0, &x_1, &u);
-        let dbl_0 = x_dbl(&p, &a, &x_0);
-        let dbl_1 = x_dbl(&p, &a, &x_1);
-        let bit = m.get_bit(i);
-        x_0 = (add.clone() * bit + dbl_0 * !bit).modulo(&p);
-        x_1 = (dbl_1 * bit + add * !bit).modulo(&p);
-    }
-    x_0.normalize(&p).x
+pub fn generate_shared_secret(private: &Bytes, peer_public: &Bytes) -> Bytes {
+    x25519(private, peer_public)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
 
-    #[test]
-    fn test_x_dbl() {
-        let p = Integer::from(101);
-        let a = Integer::from(49);
-        let x_p = PCoord {
-            x: Integer::from(2),
-            z: Integer::from(1),
-        };
-        let dbl = x_dbl(&p, &a, &x_p);
-        assert_eq!(dbl.x, Integer::from(9));
-        assert_eq!(dbl.z, Integer::from(16));
-    }
-
-    fn test_ladder(p: u32, a: u32, m: u32, x: u32, expected: u32) {
-        let p = Integer::from(p);
-        let a = Integer::from(a);
-        let x = Integer::from(x);
+    fn test_curve25519(m: u32, expected: &str) {
+        let x_p = Integer::from(9);
         let m = Integer::from(m);
-        let expected = Integer::from(expected);
-        assert_eq!(ladder(&p, &a, &m, &x), expected);
+        let expected = Integer::from_str(expected).unwrap();
+        assert_eq!(curve25519(&m, &x_p), expected);
     }
 
     #[test]
-    fn test_ladder_101_2() {
-        test_ladder(101, 49, 2, 2, 70);
+    fn test_curve25519_2() {
+        let m = 2;
+        let expected =
+            "14847277145635483483963372537557091634710985132825781088887140890597596352251";
+        test_curve25519(m, &expected)
     }
 
     #[test]
-    fn test_ladder_101_3() {
-        test_ladder(101, 49, 3, 2, 59);
+    fn test_curve25519_3() {
+        let m = 3;
+        let expected =
+            "12697861248284385512127539163427099897745340918349830473877503196793995869202";
+        test_curve25519(m, &expected)
     }
 
     #[test]
-    fn test_ladder_101_77() {
-        test_ladder(101, 49, 77, 2, 8);
+    fn test_curve25519_4() {
+        let m = 4;
+        let expected =
+            "55094879196667521951171181671895976763495004283458921215716618814842818532335";
+        test_curve25519(m, &expected)
     }
 
     #[test]
-    fn test_ladder_1009_2() {
-        test_ladder(1009, 682, 2, 7, 284);
+    fn test_curve25519_5() {
+        let m = 5;
+        let expected =
+            "29723531761959712214579609737676588517305008794118309711793522224007834336391";
+        test_curve25519(m, &expected)
     }
 
     #[test]
-    fn test_ladder_1009_3() {
-        test_ladder(1009, 682, 3, 7, 759);
-    }
-
-    #[test]
-    fn test_ladder_1009_5() {
-        test_ladder(1009, 682, 5, 7, 1000);
-    }
-
-    #[test]
-    fn test_ladder_1009_34() {
-        test_ladder(1009, 682, 34, 7, 286);
-    }
-
-    #[test]
-    fn test_ladder_1009_104() {
-        test_ladder(1009, 682, 104, 7, 810);
-    }
-
-    #[test]
-    fn test_ladder_1009_947() {
-        test_ladder(1009, 682, 947, 7, 755);
+    fn test_curve25519_7() {
+        let m = 7;
+        let expected =
+            "6189616607995615193367150877376005513902989163470402290395604116858034460712";
+        test_curve25519(m, &expected)
     }
 }
